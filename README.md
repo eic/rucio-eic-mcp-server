@@ -125,18 +125,24 @@ python rucio_eic_mcp_server.py
 python rucio_eic_mcp_server.py --transport stdio
 ```
 
-### SSE (standalone HTTP server on port 8000)
+### Streamable HTTP (standalone server on port 9103)
 
 ```bash
-python rucio_eic_mcp_server.py --transport sse
+python rucio_eic_mcp_server.py --transport http
 ```
+
+The MCP endpoint is `http://127.0.0.1:9103/mcp` (change with `--host`,
+`--port`, `--path`).  The server binds loopback by default; binding any
+other address prints a warning because the tools carry no authentication.
+The legacy SSE transport is still available with `--transport sse`.
 
 ### As installed package
 
 ```bash
 pip install .
-rucio-eic-mcp                    # stdio
-rucio-eic-mcp --transport sse    # SSE
+rucio-eic-mcp                                    # stdio
+rucio-eic-mcp --transport http --port 9103       # streamable HTTP on /mcp
+rucio-eic-mcp --transport sse                    # legacy SSE
 ```
 
 ## Setup for sys admins
