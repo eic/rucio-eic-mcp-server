@@ -921,7 +921,7 @@ def main():
     # Set post-construction so FASTMCP_* env vars / .env cannot override the CLI.
     mcp.settings.host = args.host
     mcp.settings.port = args.port
-    mcp.settings.streamable_http_path = args.path
+    mcp.settings.streamable_http_path = "/" + args.path.lstrip("/")
 
     if args.host not in {"127.0.0.1", "::1", "localhost"}:
         print(
