@@ -14,6 +14,7 @@ Based on the Belle II rucio-mcp server by Cedric Serfon and Wouter Verkerke.
 import argparse
 import os
 import re
+import sys
 import time
 from datetime import datetime
 from json import loads
@@ -367,9 +368,9 @@ def _extract_scope_eic(did: str) -> dict[str, str]:
 mcp = FastMCP(
     "rucio-eic",
     stateless_http=True,
-    json_response=True,
-    host="0.0.0.0",
-    port=8000,
+    json_response=False,
+    host="127.0.0.1",
+    port=9103,
 )
 
 
@@ -886,16 +887,50 @@ def extract_scope(did: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def main():
-    """Run the MCP server. Supports stdio (for pandabot) and SSE transports."""
+    """Run the MCP server (stdio by default, streamable HTTP on request)."""
     parser = argparse.ArgumentParser(description="Rucio EIC MCP Server")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "http", "streamable-http", "sse"],
         default="stdio",
-        help="Transport protocol (default: stdio)",
+        help="Transport to serve on (default: stdio). 'http' is streamable HTTP; "
+        "'sse' is the legacy SSE transport.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address for the HTTP transports (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9103,
+        help="TCP port for the HTTP transports (default: 9103).",
+    )
+    parser.add_argument(
+        "--path",
+        default="/mcp",
+        help="URL path the streamable-HTTP endpoint is served on (default: /mcp).",
     )
     args = parser.parse_args()
-    mcp.run(transport=args.transport)
+
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    # Set post-construction so FASTMCP_* env vars / .env cannot override the CLI.
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    mcp.settings.streamable_http_path = "/" + args.path.lstrip("/")
+
+    if args.host not in {"127.0.0.1", "::1", "localhost"}:
+        print(
+            f"WARNING: --host {args.host} exposes every tool on a non-loopback "
+            "interface with no authentication.",
+            file=sys.stderr,
+        )
+
+    mcp.run(transport="sse" if args.transport == "sse" else "streamable-http")
 
 
 if __name__ == "__main__":
