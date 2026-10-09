@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 
+DEFAULT_SCOPE = "epic"
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 500
 
@@ -392,7 +393,7 @@ def list_scopes() -> dict:
 
 @mcp.tool(description="Search for DIDs (datasets/containers) within a scope, filtered by name pattern and/or metadata key=value filters.")
 def list_dids(
-    scope: str,
+    scope: str = DEFAULT_SCOPE,
     name: Optional[str] = None,
     type: str = "DATASET",
     filters: Optional[dict[str, str]] = None,
@@ -409,7 +410,7 @@ def list_dids(
         rucio did list "scope:pattern" --filter "key=value,key2=value2"
 
     Args:
-        scope: Rucio scope (e.g., 'group.EIC', 'group.daq', 'user.wenaus', 'epic').
+        scope: Rucio scope (default 'epic'; e.g., 'group.EIC', 'group.daq', 'user.wenaus').
         name: Optional name pattern filter. Supports Rucio wildcards '*' and '?'.
               Example: '*26.03.1*' matches any DID name containing '26.03.1'.
         type: DID type filter — DATASET (default), CONTAINER, FILE, or ALL.
@@ -473,8 +474,8 @@ def list_dids(
 
 @mcp.tool(description="List files within a Rucio dataset or container.")
 def list_files(
-    scope: str,
     name: str,
+    scope: str = DEFAULT_SCOPE,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
@@ -482,8 +483,8 @@ def list_files(
     Fetch the file listing for one Rucio DID — live Rucio query, seconds per dataset.
 
     Args:
-        scope: Rucio scope (e.g., 'group.EIC').
         name: DID name (e.g., 'epic.26.02.0.ePIC_craterlake.p1001.e1.s1.r1').
+        scope: Rucio scope (default 'epic'; e.g., 'group.EIC').
         page: Result page number to return. Defaults to page 1.
         limit: Number of files per page. Defaults to 50, maximum 500.
     """
@@ -500,8 +501,8 @@ def list_files(
 
 @mcp.tool(description="List immediate children of a Rucio container or dataset.")
 def list_content(
-    scope: str,
     name: str,
+    scope: str = DEFAULT_SCOPE,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
 ) -> dict:
@@ -513,8 +514,8 @@ def list_content(
     Use list_files for a recursive listing of all files.
 
     Args:
-        scope: Rucio scope (e.g., 'epic', 'group.EIC').
         name: DID name (may contain slashes, e.g., '/RECO/26.03.1/...').
+        scope: Rucio scope (default 'epic'; e.g., 'group.EIC').
         page: Result page number to return. Defaults to page 1.
         limit: Number of child DIDs per page. Defaults to 50, maximum 500.
     """
@@ -529,14 +530,14 @@ def list_content(
 
 
 @mcp.tool(description="Get DID details — system fields plus any custom physics metadata (pwg, generator, software_release, beam energies, Q2, ion species, ...).")
-def get_did_metadata(scope: str, name: str, plugin: str = "ALL") -> dict:
+def get_did_metadata(name: str, scope: str = DEFAULT_SCOPE, plugin: str = "ALL") -> dict:
     """
     Fetch full details for a DID (Data Identifier), merging system columns
     with custom physics metadata.
 
     Args:
-        scope: Rucio scope.
         name: DID name.
+        scope: Rucio scope (default 'epic').
         plugin: Metadata plugin selector. Default "ALL" returns both Rucio
             system columns and custom JSON metadata (requester_pwg, generator,
             software_release, electron_beam_energy_gev, ion_beam_energy_gev,
@@ -582,7 +583,7 @@ def _iso_utc(value) -> Optional[str]:
 
 @mcp.tool(description="Summarize all datasets matching a name pattern in ONE call: per-dataset file counts and sizes plus totals. Use this for any 'how many files / how much data' question — never loop get_did_metadata or list_files over datasets.")
 def summarize_datasets(
-    scope: str,
+    scope: str = DEFAULT_SCOPE,
     name: Optional[str] = None,
     filters: Optional[dict[str, str]] = None,
     order: str = "name",
@@ -602,7 +603,7 @@ def summarize_datasets(
         summarize_datasets(scope='epic', name='/EVGEN/*', order='updated')
 
     Args:
-        scope: Rucio scope (e.g., 'epic', 'group.EIC').
+        scope: Rucio scope (default 'epic'; e.g., 'group.EIC').
         name: Optional name pattern with Rucio wildcards '*' and '?'
               (e.g., '/EVGEN/*', '*26.03.1*').
         filters: Optional dict of metadata key=value filters, as in
