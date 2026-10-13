@@ -28,6 +28,8 @@ from mcp.server.fastmcp import FastMCP
 DEFAULT_SCOPE = "epic"
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 500
+# Seconds to wait for one Rucio REST call; every tool takes `timeout` to override it.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = int(os.getenv("RUCIO_REQUEST_TIMEOUT", "60"))
 
 EPIC_CAMPAIGN_PREFIXES = (
     "/RECO/",
@@ -116,24 +118,65 @@ def _parse_response(data: Union[str, bytes, bytearray]) -> Any:
 # Rucio HTTP helpers
 # ---------------------------------------------------------------------------
 
+# What to do next, by the exception class Rucio reports on an HTTP error.
+RUCIO_ERROR_HINTS = {
+    "DataIdentifierNotFound": "check the scope and name with list_dids or extract_scope",
+    "ScopeNotFound": "list_scopes shows the scopes that exist",
+    "RSENotFound": "list_rses shows the RSE names",
+    "RuleNotFound": "list_rules shows the rule ids",
+    "AccountNotFound": "check the account name",
+    "CannotAuthenticate": "check RUCIO_ACCOUNT and the credentials for RUCIO_AUTH_TYPE",
+}
+
+
+def _http_error_message(response: requests.Response) -> str:
+    """Rucio's exception class and message from a failed response, with a hint."""
+    exception_class = response.headers.get("ExceptionClass", "")
+    exception_message = response.headers.get("ExceptionMessage", "")
+    if not exception_class:
+        try:
+            body = response.json()
+            exception_class = body.get("ExceptionClass", "")
+            exception_message = body.get("ExceptionMessage", "")
+        except ValueError:
+            pass
+    if not exception_class:
+        return f"HTTP {response.status_code} from {response.url}: {response.text[:200]}"
+    hint = RUCIO_ERROR_HINTS.get(exception_class)
+    message = f"{exception_class}: {exception_message}"
+    return f"{message}; {hint}" if hint else message
+
+
+def _timeout_message(tool_name: str, timeout: int) -> str:
+    return (
+        f"{tool_name}: Rucio did not answer within {timeout} s. Try a narrower "
+        "name pattern or filters, a smaller limit, or a larger timeout; the "
+        "server handles one call at a time, so retry once later."
+    )
+
+
 def _make_rucio_request(
     url: str,
     method: str = "GET",
     headers: dict = None,
     payload: dict = None,
     params: dict = None,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    tool_name: str = "",
 ) -> dict:
     """
     Make a request to the Rucio REST API.
 
     Returns dict with 'status' and 'data' on success, or 'error' on failure.
+    A timeout or a Rucio error is an 'error' string naming the tool and what to
+    try next, never an exception.
     """
     if headers is None:
         headers = {}
     try:
         response = requests.request(
             method, url, headers=headers, json=payload, params=params,
-            verify=CA_BUNDLE, timeout=60,
+            verify=CA_BUNDLE, timeout=timeout,
         )
         response.raise_for_status()
         if response.headers.get("Content-Type") == "application/x-json-stream":
@@ -141,8 +184,12 @@ def _make_rucio_request(
         if response.text:
             return {"status": response.status_code, "data": _parse_response(response.text)}
         return {"status": response.status_code, "data": None}
+    except requests.exceptions.Timeout:
+        return {"error": _timeout_message(tool_name, timeout)}
+    except requests.exceptions.HTTPError as e:
+        return {"error": f"{tool_name}: {_http_error_message(e.response)}"}
     except requests.exceptions.RequestException as e:
-        return {"error": str(e)}
+        return {"error": f"{tool_name}: {e}"}
 
 
 def _pagination_window(page: int = 1, limit: int = DEFAULT_PAGE_LIMIT) -> tuple[int, int, int, int]:
@@ -223,6 +270,11 @@ def _paginate_data_result(
 
 def _get_token_x509() -> dict:
     """Authenticate with Rucio via X509 proxy certificate."""
+    if not os.path.exists(CERT_PATH):
+        return {"error": (
+            f"X509 proxy not found at {CERT_PATH}; set X509_USER_PROXY to a "
+            "valid proxy or use RUCIO_AUTH_TYPE=userpass"
+        )}
     headers = {"X-Rucio-Account": RUCIO_ACCOUNT}
     if RUCIO_VO:
         headers["X-Rucio-VO"] = RUCIO_VO
@@ -239,12 +291,14 @@ def _get_token_x509() -> dict:
         with open(TOKEN_FILE_PATH, "w") as f:
             f.write(token)
         return {"status": response.status_code, "message": "Token stored successfully."}
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Rucio X509 authentication failed: {e}"}
+    except (requests.exceptions.RequestException, OSError) as e:
+        return {"error": f"Rucio X509 authentication failed: {e}; check X509_USER_PROXY and RUCIO_ACCOUNT"}
 
 
 def _get_token_userpass() -> dict:
     """Authenticate with Rucio via username/password."""
+    if not (RUCIO_USERNAME and RUCIO_PASSWORD):
+        return {"error": "RUCIO_USERNAME and RUCIO_PASSWORD must be set for RUCIO_AUTH_TYPE=userpass"}
     headers = {
         "X-Rucio-Account": RUCIO_ACCOUNT,
         "X-Rucio-Username": RUCIO_USERNAME,
@@ -264,7 +318,7 @@ def _get_token_userpass() -> dict:
             f.write(token)
         return {"status": response.status_code, "message": "Token stored successfully."}
     except requests.exceptions.RequestException as e:
-        return {"error": f"Rucio userpass authentication failed: {e}"}
+        return {"error": f"Rucio userpass authentication failed: {e}; check RUCIO_USERNAME, RUCIO_PASSWORD and RUCIO_ACCOUNT"}
 
 
 def _get_token() -> dict:
@@ -381,19 +435,24 @@ mcp = FastMCP(
 
 
 @mcp.tool(description="List available Rucio scopes.")
-def list_scopes() -> dict:
+def list_scopes(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     """
     Fetch all available scopes from the Rucio instance.
 
     Returns the list of scopes (e.g., group.EIC, group.daq, user.wenaus, ...).
     Use this first to discover what data is available on the server.
+
+    Args:
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers()
     except RuntimeError as e:
         return {"error": str(e)}
 
-    return _make_rucio_request(f"{RUCIO_URL}/scopes", headers=headers)
+    return _make_rucio_request(
+        f"{RUCIO_URL}/scopes", headers=headers, timeout=timeout, tool_name="list_scopes",
+    )
 
 
 @mcp.tool(description="Search for DIDs (datasets/containers) within a scope, filtered by name pattern and/or metadata key=value filters.")
@@ -405,6 +464,7 @@ def list_dids(
     long: bool = False,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     Search for DIDs within a scope — live Rucio query; seconds for narrow patterns, longer for broad wildcards over a large scope.
@@ -436,6 +496,7 @@ def list_dids(
               just name. Useful when pairing a metadata search with inspection.
         page: Result page number to return. Defaults to page 1.
         limit: Number of DIDs per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for each Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -453,7 +514,9 @@ def list_dids(
             if k in params:
                 return {"error": f"filter key '{k}' conflicts with a reserved parameter"}
             params[k] = v
-    result = _make_rucio_request(url, headers=headers, params=params)
+    result = _make_rucio_request(
+        url, headers=headers, params=params, timeout=timeout, tool_name="list_dids",
+    )
 
     # Auto-retry: if the caller asked for CONTAINER with a name or filter
     # and the server returned an empty list, retry as DATASET. Many Rucio
@@ -466,7 +529,9 @@ def list_dids(
         and result.get("data") in (None, [], "")
     ):
         params["type"] = "DATASET"
-        retry = _make_rucio_request(url, headers=headers, params=params)
+        retry = _make_rucio_request(
+            url, headers=headers, params=params, timeout=timeout, tool_name="list_dids",
+        )
         if "error" not in retry and retry.get("data"):
             retry["hint"] = (
                 "type=CONTAINER returned 0 results; showing DATASET results "
@@ -483,6 +548,7 @@ def list_files(
     scope: str = DEFAULT_SCOPE,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     Fetch the file listing for one Rucio DID — live Rucio query, seconds per dataset.
@@ -492,6 +558,7 @@ def list_files(
         scope: Rucio scope (default 'epic'; e.g., 'group.EIC').
         page: Result page number to return. Defaults to page 1.
         limit: Number of files per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -500,7 +567,10 @@ def list_files(
 
     url = f"{DIDS_URL}/bulkfiles"
     payload = {"dids": [{"scope": scope, "name": name}]}
-    result = _make_rucio_request(url, method="POST", headers=headers, payload=payload)
+    result = _make_rucio_request(
+        url, method="POST", headers=headers, payload=payload,
+        timeout=timeout, tool_name="list_files",
+    )
     return _paginate_data_result(result, page=page, limit=limit, nested_list_key="files")
 
 
@@ -510,6 +580,7 @@ def list_content(
     scope: str = DEFAULT_SCOPE,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     List the child DIDs within a container or dataset (one level).
@@ -523,6 +594,7 @@ def list_content(
         scope: Rucio scope (default 'epic'; e.g., 'group.EIC').
         page: Result page number to return. Defaults to page 1.
         limit: Number of child DIDs per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -530,12 +602,17 @@ def list_content(
         return {"error": str(e)}
 
     url = f"{DIDS_URL}/{quote(scope, safe='')}/{quote(name, safe='')}/dids"
-    result = _make_rucio_request(url, headers=headers)
+    result = _make_rucio_request(url, headers=headers, timeout=timeout, tool_name="list_content")
     return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Get DID details — system fields plus any custom physics metadata (pwg, generator, software_release, beam energies, Q2, ion species, ...).")
-def get_did_metadata(name: str, scope: str = DEFAULT_SCOPE, plugin: str = "ALL") -> dict:
+def get_did_metadata(
+    name: str,
+    scope: str = DEFAULT_SCOPE,
+    plugin: str = "ALL",
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> dict:
     """
     Fetch full details for a DID (Data Identifier), merging system columns
     with custom physics metadata.
@@ -551,6 +628,7 @@ def get_did_metadata(name: str, scope: str = DEFAULT_SCOPE, plugin: str = "ALL")
             "DID_COLUMN" (system columns only), "POSTGRES_JSON" (custom JSON
             only). Availability of custom metadata depends on server config
             and campaign — ePIC populates it from 26.03.x onward.
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers()
@@ -563,7 +641,9 @@ def get_did_metadata(name: str, scope: str = DEFAULT_SCOPE, plugin: str = "ALL")
     # parameterless call returns everything the server supports. Send the
     # selector only when the caller names a specific non-default plugin.
     params = {"plugin": plugin} if plugin and plugin != "ALL" else None
-    return _make_rucio_request(url, headers=headers, params=params)
+    return _make_rucio_request(
+        url, headers=headers, params=params, timeout=timeout, tool_name="get_did_metadata",
+    )
 
 
 # Widest match set summarize_datasets will reduce in one call; a broader
@@ -594,6 +674,7 @@ def summarize_datasets(
     order: str = "name",
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     One-call summary of every dataset matching a pattern — live Rucio walk of the full match set; broad wildcards can take a minute or more and may time out.
@@ -618,6 +699,8 @@ def summarize_datasets(
         page: Dataset-row page to return. The totals block always covers
             every match regardless of paging.
         limit: Dataset rows per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for each Rucio request (default 60); the
+            walk makes one request per dataset without a size in the search.
 
     Returns:
         totals: {datasets, files, bytes, unknown} over ALL matches —
@@ -639,7 +722,9 @@ def summarize_datasets(
             if k in params:
                 return {"error": f"filter key '{k}' conflicts with a reserved parameter"}
             params[k] = v
-    result = _make_rucio_request(url, headers=headers, params=params)
+    result = _make_rucio_request(
+        url, headers=headers, params=params, timeout=timeout, tool_name="summarize_datasets",
+    )
     if "error" in result:
         return result
 
@@ -670,7 +755,7 @@ def summarize_datasets(
             rep = _make_rucio_request(
                 f"{REPLICAS_URL}/{quote(scope, safe='')}/"
                 f"{quote(row['name'], safe='')}/datasets",
-                headers=headers,
+                headers=headers, timeout=timeout, tool_name="summarize_datasets",
             )
             replicas = [r for r in (rep.get("data") or [])
                         if isinstance(r, dict)]
@@ -708,12 +793,13 @@ def summarize_datasets(
 
 
 @mcp.tool(description="Get storage quota limits for a Rucio account.")
-def get_account_limits(account: str) -> dict:
+def get_account_limits(account: str, timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     """
     Fetch account storage limits across all RSEs.
 
     Args:
         account: Rucio account name (e.g., 'wenaus', 'rucioddm').
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers()
@@ -721,17 +807,20 @@ def get_account_limits(account: str) -> dict:
         return {"error": str(e)}
 
     url = f"{ACCOUNT_URL}/{account}/limits"
-    return _make_rucio_request(url, headers=headers)
+    return _make_rucio_request(url, headers=headers, timeout=timeout, tool_name="get_account_limits")
 
 
 @mcp.tool(description="Get storage usage for a Rucio account at a specific RSE.")
-def get_account_usage(account: str, rse: str) -> dict:
+def get_account_usage(
+    account: str, rse: str, timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS
+) -> dict:
     """
     Fetch storage usage for an account at a specific RSE.
 
     Args:
         account: Rucio account name.
         rse: RSE name (e.g., 'BNL_SDCC_EIC', 'JLAB_EIC').
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers()
@@ -739,32 +828,36 @@ def get_account_usage(account: str, rse: str) -> dict:
         return {"error": str(e)}
 
     url = f"{ACCOUNT_URL}/{account}/usage/local/{rse}"
-    return _make_rucio_request(url, headers=headers)
+    return _make_rucio_request(url, headers=headers, timeout=timeout, tool_name="get_account_usage")
 
 
 @mcp.tool(description="List all Rucio Storage Elements (RSEs).")
-def list_rses() -> dict:
+def list_rses(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     """
     Fetch the list of all RSEs (Rucio Storage Elements).
 
     Returns RSE names, availability, and basic configuration.
     EIC RSEs include BNL_SDCC_EIC, JLAB_EIC, etc.
+
+    Args:
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
     except RuntimeError as e:
         return {"error": str(e)}
 
-    return _make_rucio_request(RSES_URL, headers=headers)
+    return _make_rucio_request(RSES_URL, headers=headers, timeout=timeout, tool_name="list_rses")
 
 
 @mcp.tool(description="Get storage usage statistics for a specific RSE.")
-def get_rse_usage(rse: str) -> dict:
+def get_rse_usage(rse: str, timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     """
     Fetch usage statistics for an RSE (used, free, total bytes).
 
     Args:
         rse: RSE name (e.g., 'BNL_SDCC_EIC').
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -772,7 +865,7 @@ def get_rse_usage(rse: str) -> dict:
         return {"error": str(e)}
 
     url = f"{RSES_URL}/{rse}/usage"
-    return _make_rucio_request(url, headers=headers)
+    return _make_rucio_request(url, headers=headers, timeout=timeout, tool_name="get_rse_usage")
 
 
 @mcp.tool(description="List replication rules with optional filters, including a specific DID by scope/name.")
@@ -783,6 +876,7 @@ def list_rules(
     filters: Optional[dict[str, str]] = None,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     Fetch replication rules, optionally filtered.
@@ -801,6 +895,7 @@ def list_rules(
             Example: {"account": "wenaus", "state": "R"}
         page: Result page number to return. Defaults to page 1.
         limit: Number of rules per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -816,7 +911,9 @@ def list_rules(
         params["scope"] = scope
     if name:
         params["name"] = name
-    result = _make_rucio_request(RULES_URL, headers=headers, params=params)
+    result = _make_rucio_request(
+        RULES_URL, headers=headers, params=params, timeout=timeout, tool_name="list_rules",
+    )
     return _paginate_data_result(result, page=page, limit=limit)
 
 
@@ -825,6 +922,7 @@ def get_rule_locks(
     rule_id: str,
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     Fetch replica locks associated with a replication rule.
@@ -833,6 +931,7 @@ def get_rule_locks(
         rule_id: The Rucio rule ID (UUID).
         page: Result page number to return. Defaults to page 1.
         limit: Number of locks per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
         headers = _rucio_headers("application/x-json-stream")
@@ -840,7 +939,7 @@ def get_rule_locks(
         return {"error": str(e)}
 
     url = f"{RULES_URL}/{rule_id}/locks"
-    result = _make_rucio_request(url, headers=headers)
+    result = _make_rucio_request(url, headers=headers, timeout=timeout, tool_name="get_rule_locks")
     return _paginate_data_result(result, page=page, limit=limit)
 
 
@@ -849,6 +948,7 @@ def list_file_replicas(
     dids: list[dict[str, str]],
     page: int = 1,
     limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> dict:
     """
     Fetch replica locations for a list of DIDs — live Rucio query, roughly a second per DID; keep the list short.
@@ -858,6 +958,7 @@ def list_file_replicas(
               Example: [{"scope": "group.EIC", "name": "file.root"}]
         page: Result page number to return. Defaults to page 1.
         limit: Number of replica entries per page. Defaults to 50, maximum 500.
+        timeout: Seconds to wait for the Rucio request (default 60).
 
     Returns replica locations (RSEs and PFNs) for each file.
     """
@@ -868,7 +969,10 @@ def list_file_replicas(
 
     url = f"{REPLICAS_URL}/list"
     payload = {"dids": dids}
-    result = _make_rucio_request(url, method="POST", headers=headers, payload=payload)
+    result = _make_rucio_request(
+        url, method="POST", headers=headers, payload=payload,
+        timeout=timeout, tool_name="list_file_replicas",
+    )
     return _paginate_data_result(result, page=page, limit=limit)
 
 

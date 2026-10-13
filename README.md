@@ -48,6 +48,16 @@ list_dids(scope="epic", name="*26.04.1*", type="DATASET", page=1, limit=25)
 list_dids(scope="epic", name="*26.04.1*", type="DATASET", page=2, limit=25)
 ```
 
+## Timeouts and errors
+
+Every tool that queries Rucio takes `timeout` (seconds per request; default
+`RUCIO_REQUEST_TIMEOUT`, 60). On expiry the tool returns
+`{"error": "<tool>: Rucio did not answer within N s. ..."}` with what to try
+(narrower pattern, smaller limit, larger timeout, or retry once later: the
+server handles one call at a time). Expected failures (missing credentials,
+unknown DID, scope, RSE or rule) also come back as an `error` string that
+names the tool to call next; only unexpected errors raise.
+
 ## ePIC campaign scopes
 
 JLab ePIC production campaign datasets are commonly registered in the
@@ -117,6 +127,7 @@ export RUCIO_URL=https://rucio.jlab.org:443
 | `RUCIO_PASSWORD` | | Rucio password (userpass auth) |
 | `TOKEN_FILE_PATH` | `/tmp/rucio_eic_token.txt` | Cached auth token path |
 | `RUCIO_CA_BUNDLE` | system default | CA bundle for TLS; `false` to disable |
+| `RUCIO_REQUEST_TIMEOUT` | `60` | Default seconds to wait per Rucio request (`timeout` tool parameter) |
 
 ## Usage
 

@@ -1,4 +1,5 @@
 from datetime import datetime
+import requests
 
 import rucio_eic_mcp_server as server
 
@@ -58,3 +59,44 @@ def test_parse_response_converts_utc_strings_to_datetimes() -> None:
     parsed = server._parse_response(payload)
 
     assert parsed["created_at"] == datetime(2024, 12, 31, 0, 0, 0)
+
+
+def test_make_rucio_request_timeout_returns_explanatory_error(monkeypatch) -> None:
+    def raise_timeout(*args, **kwargs):
+        raise requests.exceptions.Timeout("read timed out")
+
+    monkeypatch.setattr(server.requests, "request", raise_timeout)
+    result = server._make_rucio_request("https://rucio.invalid/dids", timeout=7, tool_name="list_dids")
+
+    assert result["error"].startswith("list_dids: Rucio did not answer within 7 s.")
+    assert "retry once later" in result["error"]
+
+
+def test_make_rucio_request_reports_rucio_exception_class(monkeypatch) -> None:
+    response = requests.Response()
+    response.status_code = 404
+    response.url = "https://rucio.invalid/dids/epic/x/meta"
+    response.headers["ExceptionClass"] = "DataIdentifierNotFound"
+    response.headers["ExceptionMessage"] = "Data identifier 'epic:x' not found"
+
+    def raise_http_error(*args, **kwargs):
+        raise requests.exceptions.HTTPError(response=response)
+
+    monkeypatch.setattr(server.requests, "request", raise_http_error)
+    result = server._make_rucio_request(response.url, tool_name="get_did_metadata")
+
+    assert result["error"] == (
+        "get_did_metadata: DataIdentifierNotFound: Data identifier 'epic:x' not found; "
+        "check the scope and name with list_dids or extract_scope"
+    )
+
+
+def test_missing_x509_proxy_is_an_error_dict(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(server, "CERT_PATH", str(tmp_path / "missing_x509"))
+    monkeypatch.setattr(server, "TOKEN_FILE_PATH", str(tmp_path / "token"))
+    monkeypatch.setattr(server, "RUCIO_AUTH_TYPE", "x509")
+
+    result = server.list_scopes()
+
+    assert "X509 proxy not found" in result["error"]
+    assert "X509_USER_PROXY" in result["error"]
