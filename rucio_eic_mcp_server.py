@@ -35,9 +35,13 @@ EPIC_CAMPAIGN_PREFIXES = (
     "/SIM/",
     "/EVGEN/",
 )
+# XRootD bases that map onto epic-scope DID names; matched before the generic
+# "/eic/" inference in _extract_scope_eic so that "/eic/EPIC" lands in "epic".
 EPIC_STORAGE_PREFIXES = (
     "/volatile/eic/EPIC",
     "/volatile/eic/epic",
+    "/jlab-osdf-ro/eic/EPIC/volatile",  # JLab, root://dtn2304.jlab.org:8443
+    "/eic/EPIC",  # BNL, root://epicxrd1.sdcc.bnl.gov:1095
 )
 
 
@@ -317,7 +321,8 @@ def _extract_scope_eic(did: str) -> dict[str, str]:
     EIC naming conventions:
     - epic:/RECO/...             — JLab ePIC campaign datasets
     - /RECO/...                  — JLab ePIC campaign dataset names in epic scope
-    - /volatile/eic/EPIC/RECO/... — XRootD path corresponding to epic:/RECO/...
+    - /volatile/eic/EPIC/RECO/..., /jlab-osdf-ro/eic/EPIC/volatile/RECO/...,
+      /eic/EPIC/RECO/...   — XRootD paths corresponding to epic:/RECO/...
     - group.EIC:dataset_name       — ePIC production datasets
     - group.daq:swf.NNNNNN.run    — streaming workflow / DAQ datasets
     - user.<username>:name         — user datasets

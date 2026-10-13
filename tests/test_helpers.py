@@ -12,6 +12,14 @@ def test_extract_scope_eic_handles_campaign_prefixes() -> None:
         "scope": "epic",
         "name": "/RECO/26.03.1/epic_craterlake/test",
     }
+    assert server._extract_scope_eic("/jlab-osdf-ro/eic/EPIC/volatile/RECO/26.04.1/epic_craterlake/test") == {
+        "scope": "epic",
+        "name": "/RECO/26.04.1/epic_craterlake/test",
+    }
+    assert server._extract_scope_eic("/eic/EPIC/RECO/26.04.1/epic_craterlake/test") == {
+        "scope": "epic",
+        "name": "/RECO/26.04.1/epic_craterlake/test",
+    }
 
 
 def test_extract_scope_eic_handles_group_and_user_paths() -> None:

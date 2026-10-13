@@ -69,9 +69,12 @@ For managed data placement, query the replication rules for the DID:
 list_rules(did="epic:/RECO/26.04.1/epic_craterlake/SINGLE/gamma/100MeV/etaScan")
 ```
 
-Direct XRootD paths under `/volatile/eic/EPIC/...` correspond to the same
-Rucio DID names after stripping `/volatile/eic/EPIC`; for example
-`/volatile/eic/EPIC/RECO/26.04.1` maps to `epic:/RECO/26.04.1`.
+Direct XRootD paths correspond to the same Rucio DID names after stripping
+the storage base: `/jlab-osdf-ro/eic/EPIC/volatile` (JLab,
+`root://dtn2304.jlab.org:8443`, since 2026-10-04), `/eic/EPIC` (BNL,
+`root://epicxrd1.sdcc.bnl.gov:1095`) or the former `/volatile/eic/EPIC`
+(`root://dtn-eic.jlab.org`); for example
+`/jlab-osdf-ro/eic/EPIC/volatile/RECO/26.04.1` maps to `epic:/RECO/26.04.1`.
 
 ## Requirements
 
