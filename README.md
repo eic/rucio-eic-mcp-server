@@ -41,6 +41,8 @@ Paginated tools include `list_dids`, `summarize_datasets`, `list_files`, `list_c
 }
 ```
 
+When more items exist, `pagination` also carries a `note` of the form
+`truncated: 50 of 1621 shown; pass page=2 (limit up to 500) or narrow the query`.
 Request the next page by passing `page=2` with the same query. For example:
 
 ```text

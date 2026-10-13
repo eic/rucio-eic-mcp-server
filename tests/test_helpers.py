@@ -53,6 +53,15 @@ def test_parse_response_converts_utc_strings_to_datetimes() -> None:
     assert parsed["created_at"] == datetime(2024, 12, 31, 0, 0, 0)
 
 
+def test_paginate_items_notes_truncation() -> None:
+    _, pagination = server._paginate_items(list(range(120)), page=1, limit=50)
+    assert pagination["note"] == (
+        "truncated: 50 of 120 shown; pass page=2 (limit up to 500) or narrow the query"
+    )
+    _, pagination = server._paginate_items(list(range(10)), page=1, limit=50)
+    assert "note" not in pagination
+
+
 def test_make_rucio_request_timeout_returns_explanatory_error(monkeypatch) -> None:
     def raise_timeout(*args, **kwargs):
         raise requests.exceptions.Timeout("read timed out")
@@ -92,3 +101,11 @@ def test_missing_x509_proxy_is_an_error_dict(monkeypatch, tmp_path) -> None:
 
     assert "X509 proxy not found" in result["error"]
     assert "X509_USER_PROXY" in result["error"]
+
+
+def test_instructions_list_every_tool() -> None:
+    for tool in ("list_scopes", "list_dids", "summarize_datasets", "list_files",
+                 "list_content", "get_did_metadata", "get_account_limits",
+                 "get_account_usage", "list_rses", "get_rse_usage", "list_rules",
+                 "get_rule_locks", "list_file_replicas", "extract_scope"):
+        assert tool in server.mcp.instructions

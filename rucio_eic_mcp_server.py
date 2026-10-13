@@ -208,14 +208,22 @@ def _paginate_items(items: list, page: int = 1, limit: int = DEFAULT_PAGE_LIMIT)
     """Slice a list and return page metadata."""
     page, limit, start, end = _pagination_window(page, limit)
     total = len(items)
-    return items[start:end], {
+    returned = max(0, min(end, total) - min(start, total))
+    has_more = end < total
+    pagination = {
         "page": page,
         "limit": limit,
         "total_count": total,
-        "returned_count": max(0, min(end, total) - min(start, total)),
-        "has_more": end < total,
-        "next_page": page + 1 if end < total else None,
+        "returned_count": returned,
+        "has_more": has_more,
+        "next_page": page + 1 if has_more else None,
     }
+    if has_more:
+        pagination["note"] = (
+            f"truncated: {returned} of {total} shown; pass page={page + 1} "
+            f"(limit up to {MAX_PAGE_LIMIT}) or narrow the query"
+        )
+    return items[start:end], pagination
 
 
 def _paginate_data_result(
@@ -422,6 +430,29 @@ def _extract_scope_eic(did: str) -> dict[str, str]:
 
 mcp = FastMCP(
     "rucio-eic",
+    instructions=(
+        "Rucio data-management tools for EIC/ePIC. Every tool returns a dict; a "
+        "failure is {'error': '<what happened and what to try>'}, never an exception.\n"
+        "Tools:\n"
+        "- list_scopes: the scopes on the server.\n"
+        "- list_dids: datasets/containers in a scope by name pattern and metadata filters.\n"
+        "- summarize_datasets: per-dataset file counts and sizes plus totals for a pattern, in one call.\n"
+        "- list_files: files of one dataset or container.\n"
+        "- list_content: immediate children of one container or dataset.\n"
+        "- get_did_metadata: system and physics metadata of one DID.\n"
+        "- get_account_limits / get_account_usage: quota and usage of an account.\n"
+        "- list_rses / get_rse_usage: storage elements and their usage.\n"
+        "- list_rules / get_rule_locks: replication rules and their replica locks.\n"
+        "- list_file_replicas: where the replicas of given files are.\n"
+        "- extract_scope: parse an EIC DID string into scope and name (no server call).\n"
+        f"Timeouts: every tool that queries Rucio takes 'timeout' in seconds per "
+        f"request (default {DEFAULT_REQUEST_TIMEOUT_SECONDS}); on expiry it returns "
+        "an error naming the tool and the limit, and the server handles one call at "
+        "a time, so narrow the query or retry once later.\n"
+        f"Truncation: list results are paged, {DEFAULT_PAGE_LIMIT} items per page by "
+        f"default and {MAX_PAGE_LIMIT} at most; when more exist, 'pagination' "
+        "carries has_more, next_page and a 'truncated: N of M shown' note."
+    ),
     stateless_http=True,
     json_response=False,
     host="127.0.0.1",
@@ -430,7 +461,11 @@ mcp = FastMCP(
 
 
 @mcp.tool(description="List available Rucio scopes.")
-def list_scopes(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
+def list_scopes(
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> dict:
     """
     Fetch all available scopes from the Rucio instance.
 
@@ -438,6 +473,8 @@ def list_scopes(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     Use this first to discover what data is available on the server.
 
     Args:
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of scopes per page. Defaults to 50, maximum 500.
         timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
@@ -445,9 +482,10 @@ def list_scopes(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     except RuntimeError as e:
         return {"error": str(e)}
 
-    return _make_rucio_request(
+    result = _make_rucio_request(
         f"{RUCIO_URL}/scopes", headers=headers, timeout=timeout, tool_name="list_scopes",
     )
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Search for DIDs (datasets/containers) within a scope, filtered by name pattern and/or metadata key=value filters.")
@@ -827,7 +865,11 @@ def get_account_usage(
 
 
 @mcp.tool(description="List all Rucio Storage Elements (RSEs).")
-def list_rses(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
+def list_rses(
+    page: int = 1,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> dict:
     """
     Fetch the list of all RSEs (Rucio Storage Elements).
 
@@ -835,6 +877,8 @@ def list_rses(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     EIC RSEs include BNL_SDCC_EIC, JLAB_EIC, etc.
 
     Args:
+        page: Result page number to return. Defaults to page 1.
+        limit: Number of RSEs per page. Defaults to 50, maximum 500.
         timeout: Seconds to wait for the Rucio request (default 60).
     """
     try:
@@ -842,7 +886,8 @@ def list_rses(timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS) -> dict:
     except RuntimeError as e:
         return {"error": str(e)}
 
-    return _make_rucio_request(RSES_URL, headers=headers, timeout=timeout, tool_name="list_rses")
+    result = _make_rucio_request(RSES_URL, headers=headers, timeout=timeout, tool_name="list_rses")
+    return _paginate_data_result(result, page=page, limit=limit)
 
 
 @mcp.tool(description="Get storage usage statistics for a specific RSE.")
